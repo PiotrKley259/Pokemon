@@ -27,7 +27,6 @@ import numpy as np
 import optuna
 import pandas as pd
 from scipy.stats import spearmanr
-from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import Ridge
@@ -42,35 +41,16 @@ from src.features.build_features import (
     build_task_b_frame,
     feature_columns,
 )
+from src.models.pipeline import CategoricalCaster
 from src.models.splits import PurgedExpandingTimeSplit
 
 log = logging.getLogger("train")
 
 
 # --------------------------------------------------------------------------
-# Per-fold transformers
+# Per-fold pipelines (CategoricalCaster lives in pipeline.py so pickles
+# reference a stable module path)
 # --------------------------------------------------------------------------
-class CategoricalCaster(BaseEstimator, TransformerMixin):
-    """Cast categorical columns to pandas 'category' dtype using categories
-    learned from the *training fold only*. Unseen categories at transform
-    time become NaN, which XGBoost handles natively."""
-
-    def __init__(self, columns: list[str]):
-        self.columns = columns
-
-    def fit(self, X: pd.DataFrame, y=None):
-        self.categories_ = {
-            c: pd.Index(X[c].dropna().unique()) for c in self.columns
-        }
-        return self
-
-    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
-        X = X.copy()
-        for c in self.columns:
-            X[c] = pd.Categorical(X[c], categories=self.categories_[c])
-        return X
-
-
 def make_xgb_pipeline(cat_cols: list[str], params: dict, seed: int) -> Pipeline:
     model = XGBRegressor(
         objective="reg:squarederror",
@@ -316,13 +296,21 @@ def train_task_b(cfg: dict, df_raw: pd.DataFrame, horizon: int) -> dict:
     target = f"fwd_ret_{horizon}d"
     label = f"task_b_h{horizon}"
 
+    if frame.empty:
+        raise RuntimeError(
+            f"No rows have a {horizon}d forward return yet - keep running "
+            "`make collect` daily and retry once snapshots span the horizon."
+        )
     splitter = PurgedExpandingTimeSplit(
         n_splits=cfg["validation"]["task_b"]["n_splits"],
         horizon_days=horizon,
         embargo_days=cfg["validation"]["task_b"]["embargo_days"],
         min_train_days=cfg["validation"]["task_b"]["min_train_days"],
     )
-    folds = list(splitter.split(frame["snapshot_date"]))
+    try:
+        folds = list(splitter.split(frame["snapshot_date"]))
+    except ValueError as exc:
+        raise RuntimeError(f"Not enough snapshot dates for h={horizon}: {exc}")
     if not folds:
         raise RuntimeError(
             f"Not enough price history for h={horizon}: collect more "
@@ -363,24 +351,33 @@ def main() -> None:
     resolve_path(cfg, "models_dir").mkdir(parents=True, exist_ok=True)
     resolve_path(cfg, "reports_dir").mkdir(parents=True, exist_ok=True)
 
+    out = resolve_path(cfg, "reports_dir") / "metrics.json"
+
+    def write_metrics(update: dict) -> None:
+        # Written after EVERY task so a later failure never discards
+        # results that were already computed.
+        existing = json.loads(out.read_text()) if out.exists() else {}
+        existing.update(update)
+        out.write_text(json.dumps(existing, indent=2))
+        log.info("Metrics for %s written to %s", list(update), out)
+
     all_metrics: dict = {}
     if args.task in ("a", "all"):
-        all_metrics.update(train_task_a(cfg, df_raw))
+        res = train_task_a(cfg, df_raw)
+        all_metrics.update(res)
+        write_metrics(res)
     if args.task in ("b", "all"):
         horizons = ([args.horizon] if args.horizon
                     else cfg["targets"]["task_b_horizons"])
         for h in horizons:
             try:
-                all_metrics.update(train_task_b(cfg, df_raw, h))
+                res = train_task_b(cfg, df_raw, h)
             except RuntimeError as exc:
                 log.warning("Skipping task B h=%d: %s", h, exc)
-                all_metrics[f"task_b_h{h}"] = {"skipped": str(exc)}
+                res = {f"task_b_h{h}": {"skipped": str(exc)}}
+            all_metrics.update(res)
+            write_metrics(res)
 
-    out = resolve_path(cfg, "reports_dir") / "metrics.json"
-    existing = json.loads(out.read_text()) if out.exists() else {}
-    existing.update(all_metrics)
-    out.write_text(json.dumps(existing, indent=2))
-    log.info("Metrics written to %s", out)
     print(json.dumps(all_metrics, indent=2))
 
 
