@@ -17,17 +17,29 @@ leakage-safe validation, baselines, and interpretability.
 
 ## The two tasks
 
-| | Task A — cross-sectional valuation | Task B — forward return |
+**Task A — cross-sectional valuation.** *Goal: given a card's attributes
+(rarity, set, era, artist, stats…), estimate what it should cost today, so
+that the gap between predicted fair value and actual market price flags
+cards that look cheap or expensive relative to comparable cards.* The target
+is `log(market_price)` at the latest snapshot. It answers a relative-value
+question — it knows nothing about where prices are heading.
+
+**Task B — forward return.** *Goal: predict which cards will outperform over
+the next 30 / 90 days*, using price-history features (trailing returns,
+volatility, price vs set median, liquidity). The target is
+`log(P_{t+h} / P_t)`. Task B deliberately predicts the *return*, never the
+raw future price: a gradient-boosted tree predicts the mean of its training
+leaves and therefore outputs a constant outside the target range it saw — it
+cannot extrapolate a trending price level. Returns are roughly stationary,
+so trees can model them. The forecast CLI / dashboard chart compounds these
+predicted returns onto the current price to draw a future price path.
+
+| | Task A | Task B |
 |---|---|---|
-| Target | `log(market_price)` at the latest snapshot | `log(P_{t+h} / P_t)` for h = 30, 90 days |
-| Question | "Is this card cheap or expensive vs comparable cards?" | "Which cards will outperform over the next h days?" |
+| Target | `log(market_price)`, latest snapshot | `log(P_{t+h} / P_t)`, h = 30, 90d |
 | Validation | GroupKFold grouped by `set_id` (a fold never trains on its own set) | Purged + embargoed expanding-window time splits |
 | Baselines | set×rarity median, ridge regression | set×rarity median, ridge, **zero return** |
-
-Task B deliberately predicts the *return*, never the raw future price: a
-gradient-boosted tree predicts the mean of its training leaves and therefore
-outputs a constant outside the target range it saw — it cannot extrapolate a
-trending price level. Returns are roughly stationary, so trees can model them.
+| Headline metrics | MAE/RMSE/R² (log), MdAPE | MAE/RMSE/R² (log), rank IC, decile spread |
 
 ## Quickstart
 
@@ -86,23 +98,37 @@ tests/                       pytest for features and split logic
   min_child_weight, subsample, colsample_bytree, reg_lambda, reg_alpha`
   *inside* the CV loop, with early stopping on each validation fold.
 
-## Metrics
+## Results
 
-Numbers depend on your collected snapshots — regenerate with `make train`,
-which writes `reports/metrics.json`. Fill this table from that file:
+Task A, out-of-fold over 31,580 (card, variant) rows from the 2026-08-16
+snapshot (20,479 cards), 5-fold GroupKFold by set, Optuna-tuned XGBoost.
+All errors in log space; MdAPE after exponentiating:
 
-| Task | Model | MAE (log) | RMSE (log) | R² (log) | MdAPE | Rank IC | Decile spread |
-|---|---|---|---|---|---|---|---|
-| A | set×rarity median | . | . | . | — | — |
-| A | ridge | . | . | . | — | — |
-| A | **XGBoost** | . | . | . | — | — |
-| B (30d) | zero return | . | . | — | — | — |
-| B (30d) | ridge | . | . | — | . | . |
-| B (30d) | **XGBoost** | . | . | — | . | . |
+| Task | Model | MAE (log) | RMSE (log) | R² (log) | MdAPE |
+|---|---|---|---|---|---|
+| A | set×rarity median | 1.38 | 1.87 | 0.25 | 83% |
+| A | **ridge** | **0.73** | **0.96** | **0.80** | **57%** |
+| A | XGBoost | 0.85 | 1.03 | 0.77 | 78% |
+| B (30d / 90d) | *pending — needs snapshots spanning the horizon* | | | | |
 
-If XGBoost does not beat the baselines on your data, the honest conclusion is
-that it does not beat them — with few snapshots Task B especially is mostly
-noise, and the zero-return baseline is genuinely hard to beat.
+**The honest headline: ridge currently beats XGBoost.** Both crush the
+set×rarity median, and ~0.8 R² on log prices across unseen sets is a solid
+result — but the tuned tree model loses to a linear baseline. The likely
+cause: XGBoost leans heavily on `set_id` (its top SHAP feature), which is
+always unseen out-of-fold under set-grouped CV, so its capacity is spent
+memorising a signal that never generalises. If XGBoost does not beat the
+baselines, this README says so — that is the finding until features or
+tuning change it.
+
+Price-space R² (Task A): 0.36 ridge / 0.18 XGBoost — dominated by a handful
+of hype-priced outliers (see limitations), which is why log-space numbers
+are the headline. Median absolute errors of ~57–78% reflect a universe
+dominated by sub-$1 bulk cards with noisy prices.
+
+Task B needs price history: its zero-return baseline is genuinely hard to
+beat, and with few snapshots forward returns are mostly noise. `make train`
+and `make coldstart` refresh `reports/metrics.json` and
+`reports/coldstart_metrics.json` as history accumulates.
 
 Out-of-fold predicted-vs-actual, SHAP, and per-fold train/validation loss
 curves: `reports/figures/` after `make evaluate` (e.g.
@@ -214,3 +240,40 @@ make coldstart  # decomposition, probes, ablation, premium model
 - **Novelty means extrapolation.** For genuinely new art styles the nearest
   neighbours are far away and the neighbour features are noise — that is what
   the novelty flag is for.
+- **Hype outliers are unexplainable by construction.** Cards priced by
+  collabs, scarcity events, or cultural status (e.g. the Van Gogh Pikachu at
+  ~500× its peer median) carry no signal in the features; the model's "gap"
+  for them measures the hype, not mispricing. The dashboard flags cards
+  trading >~20× their set×rarity median and excludes them from rankings by
+  default.
+
+### Known look-ahead caveats
+
+An honest audit of where future information can still touch the numbers:
+
+- **Liquidity count spans the full history (Task B).** `n_price_snapshots`
+  — a Task B feature and the sample weight — counts a card's priced
+  snapshots across *all* dates, so an early row partially "knows" the card
+  survived and stayed listed. Harmless for Task A (single cross-section),
+  a mild but real leak for Task B.
+- **The cold-start holdout is set-based, not time-based, in its prices.**
+  Sets are held out by release date, but every price — including for
+  20-year-old training sets — is measured *today*. Character equity fitted
+  on "old" sets therefore encodes popularity accumulated after the held-out
+  sets released, and in return mode, training-set returns can share the
+  calendar window (and market-wide moves) with holdout returns. The
+  experiment scores a new set *with today's knowledge of every character*,
+  not with release-day knowledge.
+- **Hyperparameter selection is inside the reported folds.** Optuna picks
+  the best of 50 trials using all CV folds, and the headline metrics are
+  computed on those same folds — so they are "best-of-search" numbers, and
+  truly out-of-sample performance will be slightly worse.
+- **Snapshot timestamps are pull dates.** TCGPlayer prices update on their
+  own schedule, so "the price at t" can be a day or two stale; the Task B
+  embargo absorbs most, not all, of this fuzz.
+
+What is verifiably clean (covered by the test suite): trailing
+returns/volatility use strictly past data, the Task B train window always
+ends `h + embargo` days before validation starts, encoders/imputers/medians
+are fitted per fold, and cold-start neighbour features never use same-set
+cards.
