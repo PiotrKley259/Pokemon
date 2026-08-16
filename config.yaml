@@ -1,0 +1,88 @@
+# All paths and hyperparameters for the Pokemon TCG price-prediction project.
+
+seed: 42
+
+paths:
+  raw_dir: data/raw
+  processed_dir: data/processed
+  dataset: data/processed/cards.parquet
+  models_dir: models
+  reports_dir: reports
+  figures_dir: reports/figures
+
+api:
+  base_url: https://api.pokemontcg.io/v2
+  page_size: 250
+  # Requests per second we allow ourselves. Without an API key the service
+  # allows ~30 req/min; with a free key 1000/day is comfortable at 0.5 rps.
+  rate_limit_rps: 0.4
+  max_retries: 5
+  retry_backoff_seconds: 5.0
+  # Set the POKEMONTCG_API_KEY environment variable to authenticate.
+
+dataset:
+  # tcgplayer price variants we keep as separate rows
+  variants:
+    - normal
+    - holofoil
+    - reverseHolofoil
+    - 1stEditionHolofoil
+    - 1stEditionNormal
+    - unlimitedHolofoil
+
+features:
+  categorical:
+    - rarity
+    - set_id
+    - series
+    - artist
+    - supertype
+    - subtype
+    - variant
+    - energy_type
+  numeric:
+    - hp
+    - retreat_cost
+    - attack_count
+    - card_number
+    - set_size
+    - card_number_ratio
+    - days_since_release
+    - pokedex_number
+    - is_full_art
+    - is_alt_art
+    - is_secret
+    - is_promo
+    - is_starter
+    - is_legendary
+    - is_first_gen
+  history:            # Task B only
+    return_windows: [7, 30, 90]
+    vol_window: 30
+
+targets:
+  task_b_horizons: [30, 90]
+  # Snapshots may not land exactly h days apart; accept a match within
+  # this tolerance (days) when looking up the future price.
+  horizon_tolerance_days: 7
+
+validation:
+  task_a:
+    n_splits: 5          # GroupKFold grouped by set_id
+  task_b:
+    n_splits: 4          # expanding-window time splits
+    embargo_days: 5      # extra gap on top of the h-day purge
+    min_train_days: 60
+
+model:
+  optuna_trials: 50
+  early_stopping_rounds: 50
+  n_estimators: 2000
+  search_space:
+    max_depth: [3, 9]
+    learning_rate: [0.01, 0.3]
+    min_child_weight: [1.0, 20.0]
+    subsample: [0.6, 1.0]
+    colsample_bytree: [0.5, 1.0]
+    reg_lambda: [0.001, 10.0]
+    reg_alpha: [0.001, 10.0]

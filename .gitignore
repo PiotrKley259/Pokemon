@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# data and artifacts stay local
+data/raw/*
+data/processed/*
+models/*
+reports/*
+!reports/figures/
+reports/figures/*
+!reports/figures/.gitkeep
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!models/.gitkeep
+!reports/figures/.gitkeep
+
+.DS_Store
+.env
