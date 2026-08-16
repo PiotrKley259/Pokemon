@@ -136,8 +136,24 @@ def main():
 
     with tab_ranked:
         st.subheader("Ranked by model-implied undervaluation")
+        st.caption(
+            "Cards the model values ABOVE their market price (predicted "
+            "fair value > actual), ranked by the gap. A relative-value "
+            "signal versus comparable cards - not a prediction that the "
+            "price will rise."
+        )
         min_price = st.slider("Minimum market price ($)", 0.0, 50.0, 1.0)
-        min_liq = st.slider("Minimum price snapshots (liquidity)", 1, 20, 2)
+        # Cap the liquidity filter at what the data can satisfy: with a
+        # single collected snapshot every card has exactly 1, and a fixed
+        # default of 2 would empty the table.
+        liq_max = int(scored["n_price_snapshots"].max())
+        if liq_max > 1:
+            min_liq = st.slider("Minimum price snapshots (liquidity)",
+                                1, max(liq_max, 2), min(2, liq_max))
+        else:
+            min_liq = 1
+            st.caption("Liquidity filter disabled - only one snapshot "
+                       "collected so far.")
         hide_hype = st.checkbox(
             "Exclude hype outliers (price > ~20× comparable median — the "
             "model cannot judge these)", value=True)
