@@ -49,6 +49,15 @@ def score_frame():
     frame["fair_value"] = np.exp(frame["pred_log"])
     frame["gap_pct"] = 100 * (frame["fair_value"] - frame["price_market"]) \
         / frame["price_market"]
+    # Hype-outlier flag: price sits far above the set x rarity median, i.e.
+    # the market prices something (a collab, scarcity event, cultural status)
+    # that no feature describes. The model's gap for these cards measures the
+    # hype itself, not mispricing. 3 log-units = ~20x the comparable median.
+    peer_median = frame.groupby(["set_id", "rarity"], observed=True)[
+        "price_market"].transform("median")
+    frame["hype_dev"] = np.log(frame["price_market"]) - \
+        np.log(peer_median.where(peer_median > 0))
+    frame["hype_outlier"] = frame["hype_dev"] > 3.0
     return frame
 
 
@@ -105,6 +114,15 @@ def main():
                 st.metric("Predicted fair value",
                           f"${row['fair_value'].iloc[0]:,.2f}",
                           delta=f"{row['gap_pct'].iloc[0]:+.1f}% vs market")
+                if bool(row["hype_outlier"].iloc[0]):
+                    st.warning(
+                        "🔥 **Hype outlier** — this card trades at "
+                        f"~{np.exp(row['hype_dev'].iloc[0]):.0f}× the median "
+                        "of comparable cards in its set and rarity. Its price "
+                        "is driven by factors outside the model's features "
+                        "(collabs, scarcity events, cultural status), so the "
+                        "gap above measures the hype itself, not mispricing."
+                    )
                 st.write(
                     f"**{row['rarity'].iloc[0]}** · {row['series'].iloc[0]} · "
                     f"snapshot {row['snapshot_date'].iloc[0].date()}"
@@ -116,13 +134,21 @@ def main():
         st.subheader("Ranked by model-implied undervaluation")
         min_price = st.slider("Minimum market price ($)", 0.0, 50.0, 1.0)
         min_liq = st.slider("Minimum price snapshots (liquidity)", 1, 20, 2)
-        table = scored[
+        hide_hype = st.checkbox(
+            "Exclude hype outliers (price > ~20× comparable median — the "
+            "model cannot judge these)", value=True)
+        pool = scored[
             (scored["price_market"] >= min_price)
             & (scored["n_price_snapshots"] >= min_liq)
-        ].nlargest(50, "gap_pct")[
-            ["card_id", "name", "set_name", "rarity", "variant",
-             "price_market", "fair_value", "gap_pct", "n_price_snapshots"]
         ]
+        if hide_hype:
+            pool = pool[~pool["hype_outlier"]]
+        table = pool.nlargest(50, "gap_pct")[
+            ["card_id", "name", "set_name", "rarity", "variant",
+             "price_market", "fair_value", "gap_pct", "hype_outlier",
+             "n_price_snapshots"]
+        ]
+        table["hype_outlier"] = table["hype_outlier"].map({True: "🔥", False: ""})
         st.dataframe(
             table.style.format({"price_market": "${:.2f}",
                                 "fair_value": "${:.2f}",
