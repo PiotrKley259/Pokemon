@@ -87,10 +87,20 @@ def log_space_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     err = y_pred - y_true
     mdape = float(np.median(np.abs(np.exp(y_pred) - np.exp(y_true))
                             / np.exp(y_true)))
+
+    def r2(t: np.ndarray, p: np.ndarray) -> float:
+        ss_tot = float(np.sum((t - t.mean()) ** 2))
+        return 1.0 - float(np.sum((p - t) ** 2)) / ss_tot if ss_tot > 0 \
+            else float("nan")
+
     return {
         "mae_log": float(np.mean(np.abs(err))),
         "rmse_log": float(np.sqrt(np.mean(err ** 2))),
         "mdape": mdape,
+        "r2_log": r2(y_true, y_pred),
+        # R^2 on actual prices: heavily dominated by the expensive tail,
+        # reported for completeness - r2_log is the fair headline number.
+        "r2_price": r2(np.exp(y_true), np.exp(y_pred)),
     }
 
 
@@ -168,10 +178,12 @@ def fit_xgb_fold(
     X_tr, X_va = caster.transform(tr[cols]), caster.transform(va[cols])
     xgb = pipe.named_steps["xgb"]
     xgb.set_params(early_stopping_rounds=early_stopping_rounds)
+    # Train set first, validation set last: early stopping monitors the LAST
+    # entry, and evals_result() then holds both curves for the loss plot.
     xgb.fit(
         X_tr, tr[target],
         sample_weight=tr["sample_weight"],
-        eval_set=[(X_va, va[target])],
+        eval_set=[(X_tr, tr[target]), (X_va, va[target])],
         verbose=False,
     )
     return pipe, xgb.predict(X_va)
@@ -219,10 +231,18 @@ def run_cv(
     oof["pred_median"] = np.nan
     oof["fold"] = -1
     best_iters = []
+    loss_curves: dict = {}
     for i, (train_idx, val_idx) in enumerate(folds):
         pipe, pred = fit_xgb_fold(df, train_idx, val_idx, cat_cols, num_cols,
                                   target, best_params, seed, esr)
-        best_iters.append(pipe.named_steps["xgb"].best_iteration or n_estimators)
+        xgb = pipe.named_steps["xgb"]
+        best_iters.append(xgb.best_iteration or n_estimators)
+        evals = xgb.evals_result()
+        loss_curves[f"fold_{i}"] = {
+            "train_rmse": evals["validation_0"]["rmse"],
+            "val_rmse": evals["validation_1"]["rmse"],
+            "best_iteration": int(xgb.best_iteration or n_estimators),
+        }
         tr, va = df.iloc[train_idx], df.iloc[val_idx]
         ridge = make_ridge_pipeline(cat_cols, num_cols, seed)
         ridge.fit(tr[cols], tr[target], ridge__sample_weight=tr["sample_weight"])
@@ -245,15 +265,18 @@ def run_cv(
             metrics[name]["rank_ic"] = rank_ic(y, scored[col].to_numpy())
             metrics[name]["decile_backtest"] = decile_spread(
                 y, scored[col].to_numpy())
-        # mdape is meaningless for returns (exp of a return is not a price gap)
+        # mdape/r2_price are meaningless for returns (exp of a return is a
+        # growth factor, not a price)
         for m in metrics.values():
             m.pop("mdape", None)
+            m.pop("r2_price", None)
 
     return {
         "best_params": best_params,
         "best_iteration_mean": int(np.mean(best_iters)),
         "metrics": metrics,
         "oof": scored,
+        "loss_curves": loss_curves,
     }
 
 
@@ -286,6 +309,8 @@ def train_task_a(cfg: dict, df_raw: pd.DataFrame) -> dict:
     )
     result["oof"].to_parquet(
         resolve_path(cfg, "reports_dir") / "oof_task_a.parquet", index=False)
+    (resolve_path(cfg, "reports_dir") / "loss_curves_task_a.json").write_text(
+        json.dumps(result["loss_curves"]))
     return {"task_a": {k: result[k] for k in
                        ("best_params", "best_iteration_mean", "metrics")}}
 
@@ -334,6 +359,8 @@ def train_task_b(cfg: dict, df_raw: pd.DataFrame, horizon: int) -> dict:
     )
     result["oof"].to_parquet(
         resolve_path(cfg, "reports_dir") / f"oof_{label}.parquet", index=False)
+    (resolve_path(cfg, "reports_dir") / f"loss_curves_{label}.json").write_text(
+        json.dumps(result["loss_curves"]))
     return {label: {k: result[k] for k in
                     ("best_params", "best_iteration_mean", "metrics")}}
 

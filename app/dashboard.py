@@ -33,10 +33,14 @@ def load_bundle():
 
 
 @st.cache_data
-def load_frame():
+def load_raw():
     cfg = load_config()
-    df_raw = pd.read_parquet(resolve_path(cfg, "dataset"))
-    return build_task_a_frame(df_raw)
+    return pd.read_parquet(resolve_path(cfg, "dataset"))
+
+
+@st.cache_data
+def load_frame():
+    return build_task_a_frame(load_raw())
 
 
 @st.cache_data
@@ -59,6 +63,34 @@ def score_frame():
         np.log(peer_median.where(peer_median > 0))
     frame["hype_outlier"] = frame["hype_dev"] > 3.0
     return frame
+
+
+def price_history_chart(cfg, card_id: str, variant: str):
+    """Observed snapshot history plus the Task-B forecast path (dashed)."""
+    from src.models.forecast import forecast_card
+
+    hist = load_raw()
+    hist = hist[(hist["card_id"] == card_id) & (hist["variant"] == variant)]
+    hist = hist.dropna(subset=["price_market"]).sort_values("snapshot_date")
+
+    fig, ax = plt.subplots(figsize=(8, 3.2))
+    ax.plot(hist["snapshot_date"], hist["price_market"], marker="o",
+            markersize=3, linewidth=1.2, label="observed market price")
+    forecast_err = None
+    try:
+        path = forecast_card(cfg, card_id, variant)
+        ax.plot(path["date"], path["predicted_price"], linestyle="--",
+                linewidth=1.2, color="darkorange", label="predicted path")
+        anchors = path[path["is_anchor"]]
+        ax.scatter(anchors["date"], anchors["predicted_price"],
+                   color="darkorange", s=25, zorder=3)
+    except (FileNotFoundError, KeyError) as exc:
+        forecast_err = str(exc)
+    ax.set_ylabel("price ($)")
+    ax.legend(fontsize=8)
+    fig.autofmt_xdate()
+    plt.tight_layout()
+    return fig, forecast_err
 
 
 def shap_waterfall(bundle, row: pd.DataFrame):
@@ -127,6 +159,20 @@ def main():
                     f"**{row['rarity'].iloc[0]}** · {row['series'].iloc[0]} · "
                     f"snapshot {row['snapshot_date'].iloc[0].date()}"
                 )
+                st.subheader("Price history & predicted path")
+                fig, forecast_err = price_history_chart(
+                    cfg, row["card_id"].iloc[0], row["variant"].iloc[0])
+                st.pyplot(fig)
+                if forecast_err:
+                    st.info(f"No forecast yet: {forecast_err}")
+                else:
+                    st.caption(
+                        "Dashed path: current price compounded with the "
+                        "Task B forward-return predictions (30/90d point "
+                        "estimates, interpolated in log space). See "
+                        "reports/metrics.json for the models' validated "
+                        "error. Not financial advice."
+                    )
                 st.subheader("Why? (SHAP waterfall, log-price space)")
                 st.pyplot(shap_waterfall(bundle, row))
 

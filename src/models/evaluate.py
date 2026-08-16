@@ -73,6 +73,35 @@ def shap_plots(cfg: dict, bundle: dict, oof: pd.DataFrame, label: str,
     log.info("SHAP plots for %s written to %s", label, fig_dir)
 
 
+def loss_curve_plot(cfg: dict, label: str) -> None:
+    """Per-fold train vs validation RMSE by boosting iteration."""
+    import json
+
+    path = resolve_path(cfg, "reports_dir") / f"loss_curves_{label}.json"
+    if not path.exists():
+        log.warning("No loss curves at %s (retrain to record them)", path)
+        return
+    curves = json.loads(path.read_text())
+    n = len(curves)
+    fig, axes = plt.subplots(1, n, figsize=(4 * n, 3.5), sharey=True,
+                             squeeze=False)
+    for ax, (fold, c) in zip(axes[0], sorted(curves.items())):
+        ax.plot(c["train_rmse"], label="train", linewidth=1)
+        ax.plot(c["val_rmse"], label="validation", linewidth=1)
+        ax.axvline(c["best_iteration"], color="grey", linestyle="--",
+                   linewidth=0.8, label=f"best iter {c['best_iteration']}")
+        ax.set_title(fold)
+        ax.set_xlabel("boosting iteration")
+        ax.legend(fontsize=7)
+    axes[0][0].set_ylabel("RMSE (log space)")
+    fig.suptitle(f"Loss curves - {label}")
+    plt.tight_layout()
+    plt.savefig(resolve_path(cfg, "figures_dir") / f"loss_curves_{label}.png",
+                dpi=150)
+    plt.close("all")
+    log.info("Loss curves for %s written", label)
+
+
 def residual_plots(cfg: dict, bundle: dict, oof: pd.DataFrame, label: str) -> None:
     fig_dir = resolve_path(cfg, "figures_dir")
     target = bundle["target"]
@@ -128,6 +157,7 @@ def main() -> None:
     resolve_path(cfg, "figures_dir").mkdir(parents=True, exist_ok=True)
     shap_plots(cfg, bundle, oof, label)
     residual_plots(cfg, bundle, oof, label)
+    loss_curve_plot(cfg, label)
 
 
 if __name__ == "__main__":

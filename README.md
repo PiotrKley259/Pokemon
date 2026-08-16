@@ -91,8 +91,8 @@ tests/                       pytest for features and split logic
 Numbers depend on your collected snapshots — regenerate with `make train`,
 which writes `reports/metrics.json`. Fill this table from that file:
 
-| Task | Model | MAE (log) | RMSE (log) | MdAPE | Rank IC | Decile spread |
-|---|---|---|---|---|---|---|
+| Task | Model | MAE (log) | RMSE (log) | R² (log) | MdAPE | Rank IC | Decile spread |
+|---|---|---|---|---|---|---|---|
 | A | set×rarity median | . | . | . | — | — |
 | A | ridge | . | . | . | — | — |
 | A | **XGBoost** | . | . | . | — | — |
@@ -104,8 +104,20 @@ If XGBoost does not beat the baselines on your data, the honest conclusion is
 that it does not beat them — with few snapshots Task B especially is mostly
 noise, and the zero-return baseline is genuinely hard to beat.
 
-Out-of-fold predicted-vs-actual and SHAP plots: `reports/figures/` after
-`make evaluate` (e.g. `pred_vs_actual_task_a.png`, `shap_summary_task_a.png`).
+Out-of-fold predicted-vs-actual, SHAP, and per-fold train/validation loss
+curves: `reports/figures/` after `make evaluate` (e.g.
+`pred_vs_actual_task_a.png`, `shap_summary_task_a.png`,
+`loss_curves_task_a.png`). Metrics include R² in log space and (Task A only)
+on raw prices; the price-space R² is dominated by the expensive tail, so
+`r2_log` is the fair headline number.
+
+**Price forecasts.** `python -m src.models.forecast --card-id xy7-54
+--variant holofoil` (and the chart in the dashboard's card lookup) projects a
+card's future price path by compounding today's price with the Task B
+forward-return predictions: `P(t+h) = P(t) * exp(r_hat_h)`, interpolated in
+log space between horizons. Returns, not price levels, are predicted because
+trees cannot extrapolate levels; the path is a point-estimate scenario whose
+honest error is the Task B validation error in `reports/metrics.json`.
 
 ## Cold-start visual model (new sets, no price history)
 
