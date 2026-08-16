@@ -45,25 +45,33 @@ def _get_with_retries(
     params: dict,
     max_retries: int,
     backoff: float,
-) -> dict:
+) -> dict | None:
+    """Fetch with retries; return None (instead of raising) when exhausted.
+
+    api.pokemontcg.io intermittently answers ~half of all requests with an
+    instant 500/502 regardless of load, so transient failures are the normal
+    case: retry generously with a capped backoff, and let the caller decide
+    what a permanently failed page means.
+    """
     for attempt in range(1, max_retries + 1):
+        wait = min(backoff * 1.5 ** (attempt - 1), 30.0)
         try:
             resp = sess.get(url, params=params, timeout=60)
             if resp.status_code == 200:
                 return resp.json()
             if resp.status_code in (429, 500, 502, 503, 504):
-                wait = backoff * 2 ** (attempt - 1)
                 log.warning("HTTP %s on %s, retry %d/%d in %.0fs",
                             resp.status_code, url, attempt, max_retries, wait)
                 time.sleep(wait)
                 continue
             resp.raise_for_status()
         except requests.RequestException as exc:
-            wait = backoff * 2 ** (attempt - 1)
             log.warning("Request error %s, retry %d/%d in %.0fs",
                         exc, attempt, max_retries, wait)
             time.sleep(wait)
-    raise RuntimeError(f"Failed to fetch {url} after {max_retries} retries")
+    log.error("Giving up on %s params=%s after %d retries",
+              url, params, max_retries)
+    return None
 
 
 def collect_sets(cfg: dict, sess: requests.Session, raw_dir: Path) -> None:
@@ -76,6 +84,9 @@ def collect_sets(cfg: dict, sess: requests.Session, raw_dir: Path) -> None:
         sess, f"{cfg['api']['base_url']}/sets", {"pageSize": 250},
         cfg["api"]["max_retries"], cfg["api"]["retry_backoff_seconds"],
     )
+    if data is None:
+        log.warning("Could not fetch /sets this run; will retry next run")
+        return
     out.write_text(json.dumps(data, indent=1), encoding="utf-8")
     log.info("Saved %d sets to %s", len(data.get("data", [])), out)
 
@@ -99,6 +110,8 @@ def collect_cards(
     min_interval = 1.0 / cfg["api"]["rate_limit_rps"]
 
     page = 1
+    skipped: list[int] = []
+    consecutive_failures = 0
     while True:
         if max_pages is not None and page > max_pages:
             log.info("Reached max_pages=%d, stopping", max_pages)
@@ -113,6 +126,20 @@ def collect_cards(
             sess, base_url, {"page": page, "pageSize": page_size},
             cfg["api"]["max_retries"], cfg["api"]["retry_backoff_seconds"],
         )
+        if data is None:
+            # One dead page must not kill the whole snapshot: skip it and
+            # keep going. Its file is never written, so the next run of
+            # `make collect` retries exactly the missing pages.
+            skipped.append(page)
+            consecutive_failures += 1
+            if consecutive_failures >= 5:
+                log.error("%d consecutive pages failed - the API looks down; "
+                          "stopping this run (re-run later to resume)",
+                          consecutive_failures)
+                break
+            page += 1
+            continue
+        consecutive_failures = 0
         cards = data.get("data", [])
         if not cards:
             log.info("Empty page %d, collection complete", page)
@@ -124,6 +151,10 @@ def collect_cards(
         if elapsed < min_interval:
             time.sleep(min_interval - elapsed)
         page += 1
+    if skipped:
+        log.warning("Snapshot incomplete: pages %s failed. Re-run "
+                    "`python -m src.data.collect --snapshot-date %s` to "
+                    "fill the gaps.", skipped, snapshot_date)
     return snap_dir
 
 

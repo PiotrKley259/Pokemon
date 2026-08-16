@@ -18,8 +18,10 @@ api:
   # Requests per second we allow ourselves. Without an API key the service
   # allows ~30 req/min; with a free key 1000/day is comfortable at 0.5 rps.
   rate_limit_rps: 0.4
-  max_retries: 5
-  retry_backoff_seconds: 5.0
+  # The API fails ~half of all requests with instant 500/502s even when
+  # healthy, so retries are the normal path, not the exception.
+  max_retries: 10
+  retry_backoff_seconds: 2.0
   # Set the POKEMONTCG_API_KEY environment variable to authenticate.
 
 dataset:
