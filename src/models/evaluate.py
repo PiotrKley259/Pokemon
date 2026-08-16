@@ -53,11 +53,19 @@ def shap_plots(cfg: dict, bundle: dict, oof: pd.DataFrame, label: str,
     plt.savefig(fig_dir / f"shap_summary_{label}.png", dpi=150)
     plt.close("all")
 
+    # dependence_plot sorts raw feature values; categorical columns with NaN
+    # become mixed str/float arrays it cannot sort, so plot a stringified copy
+    # (SHAP label-encodes strings itself).
+    X_plot = X.copy()
+    for c in bundle["cat_cols"]:
+        # astype(str) on a Categorical keeps NaN as float NaN, so fill first.
+        X_plot[c] = X_plot[c].astype(object).fillna("missing").astype(str)
+
     top5 = np.argsort(np.abs(sv.values).mean(axis=0))[::-1][:5]
     for idx in top5:
         feat = X.columns[idx]
         plt.figure()
-        shap.dependence_plot(feat, sv.values, X, show=False,
+        shap.dependence_plot(feat, sv.values, X_plot, show=False,
                              interaction_index=None)
         plt.tight_layout()
         plt.savefig(fig_dir / f"shap_dependence_{label}_{feat}.png", dpi=150)
