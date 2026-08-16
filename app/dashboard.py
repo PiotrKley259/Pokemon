@@ -92,8 +92,9 @@ def main():
         )
         return
 
-    tab_card, tab_ranked, tab_scanner = st.tabs(
-        ["Card lookup", "Most undervalued", "New Set Scanner"])
+    tab_card, tab_ranked, tab_hype, tab_scanner = st.tabs(
+        ["Card lookup", "Most undervalued", "Hype outliers 🔥",
+         "New Set Scanner"])
 
     with tab_card:
         scored["label"] = (
@@ -176,8 +177,57 @@ def main():
             use_container_width=True, height=600,
         )
 
+    with tab_hype:
+        render_hype_outliers(scored)
+
     with tab_scanner:
         render_new_set_scanner()
+
+
+def render_hype_outliers(scored: pd.DataFrame):
+    st.subheader("Hype outliers — cards the features cannot explain")
+    st.caption(
+        "Cards trading above ~20× the median of comparable cards in their "
+        "set and rarity. Their prices are driven by collabs, scarcity "
+        "events, or cultural status — signals absent from the model's "
+        "features, so its fair-value gap for these cards measures the hype "
+        "itself, not mispricing."
+    )
+    hype = (scored[scored["hype_outlier"]]
+            .sort_values("hype_dev", ascending=False)
+            .drop_duplicates("card_id"))
+    if hype.empty:
+        st.info("No hype outliers in the current dataset.")
+        return
+
+    c1, c2 = st.columns(2)
+    with c1:
+        n_show = st.slider("Cards to show", 10, min(200, len(hype)),
+                           min(30, len(hype)), step=10)
+    with c2:
+        min_price = st.slider("Minimum market price ($)", 0, 500, 0, step=10)
+    hype = hype[hype["price_market"] >= min_price].head(n_show)
+    st.write(f"**{len(hype)}** cards shown "
+             f"({int(scored['hype_outlier'].sum())} flagged in total)")
+
+    per_row = 5
+    rows = [hype.iloc[i:i + per_row] for i in range(0, len(hype), per_row)]
+    for chunk in rows:
+        cols = st.columns(per_row)
+        for col, (_, card) in zip(cols, chunk.iterrows()):
+            with col:
+                if pd.notna(card["image_url"]):
+                    st.image(card["image_url"], use_container_width=True)
+                st.markdown(
+                    f"**{card['name']}**  \n"
+                    f"{card['set_name']} · {card['rarity']}  \n"
+                    f"({card['card_id']}, {card['variant']})"
+                )
+                st.markdown(
+                    f"💰 **${card['price_market']:,.2f}**  \n"
+                    f"🔥 ~{np.exp(card['hype_dev']):,.0f}× peer median  \n"
+                    f"model: ${card['fair_value']:,.2f}"
+                )
 
 
 # --------------------------------------------------------------------------
