@@ -65,104 +65,6 @@ def score_frame():
     return frame
 
 
-@st.cache_data
-def load_oof(name: str) -> pd.DataFrame | None:
-    cfg = load_config()
-    path = resolve_path(cfg, "reports_dir") / f"oof_{name}.parquet"
-    return pd.read_parquet(path) if path.exists() else None
-
-
-@st.cache_data
-def fair_value_series(card_id: str, variant: str) -> pd.DataFrame:
-    """Task A fair value evaluated at EVERY snapshot of the card, so the
-    model's valuation can be compared against the observed series over time.
-    Uses the final (refit) model - the honest out-of-fold point is overlaid
-    separately."""
-    from src.features.build_features import (add_liquidity_weight,
-                                             add_static_features)
-    cfg, bundle = load_bundle()
-    raw = load_raw()
-    rows = raw[(raw["card_id"] == card_id) & (raw["variant"] == variant)]
-    rows = rows.dropna(subset=["price_market"]).sort_values("snapshot_date")
-    if rows.empty:
-        return pd.DataFrame(columns=["snapshot_date", "fair_value"])
-    feats = add_liquidity_weight(add_static_features(rows))
-    cols = bundle["cat_cols"] + bundle["num_cols"]
-    pred = bundle["pipeline"].predict(feats[cols])
-    return pd.DataFrame({"snapshot_date": feats["snapshot_date"].to_numpy(),
-                         "fair_value": np.exp(pred)})
-
-
-def price_history_chart(cfg, card_id: str, variant: str):
-    """Observed history vs the model: fair-value series, honest out-of-fold
-    predictions (Task A point + Task B horizon points), and the forward
-    forecast path (dashed)."""
-    from src.models.forecast import forecast_card
-
-    hist = load_raw()
-    hist = hist[(hist["card_id"] == card_id) & (hist["variant"] == variant)]
-    hist = hist.dropna(subset=["price_market"]).sort_values("snapshot_date")
-
-    fig, ax = plt.subplots(figsize=(8, 3.4))
-    ax.plot(hist["snapshot_date"], hist["price_market"], marker="o",
-            markersize=3, linewidth=1.4, color="tab:blue",
-            label="observed market price")
-
-    # Model fair value at every snapshot (how closely the ML tracks the
-    # actual series; refit model, so slightly optimistic).
-    fv = fair_value_series(card_id, variant)
-    if not fv.empty:
-        ax.plot(fv["snapshot_date"], fv["fair_value"], marker="s",
-                markersize=3, linewidth=1.1, color="tab:green",
-                alpha=0.85, label="model fair value (Task A)")
-
-    # Honest out-of-fold prediction: made by a fold that never saw this set.
-    oof_a = load_oof("task_a")
-    if oof_a is not None:
-        p = oof_a[(oof_a["card_id"] == card_id)
-                  & (oof_a["variant"] == variant)]
-        if not p.empty:
-            ax.scatter(p["snapshot_date"], np.exp(p["pred_xgb"]),
-                       marker="*", s=140, color="tab:purple", zorder=4,
-                       label="out-of-fold prediction (unseen set)")
-
-    # Task B out-of-fold: predicted price at t+h vs what actually happened.
-    for h in cfg["targets"]["task_b_horizons"]:
-        oof_b = load_oof(f"task_b_h{h}")
-        if oof_b is None:
-            continue
-        p = oof_b[(oof_b["card_id"] == card_id)
-                  & (oof_b["variant"] == variant)]
-        if p.empty:
-            continue
-        ax.scatter(p["snapshot_date"] + pd.Timedelta(days=h),
-                   p["price_market"] * np.exp(p["pred_xgb"]),
-                   marker="^", s=35, zorder=3,
-                   label=f"Task B OOF predicted (t+{h}d)")
-
-    forecast_err = None
-    try:
-        path = forecast_card(cfg, card_id, variant)
-        ax.plot(path["date"], path["predicted_price"], linestyle="--",
-                linewidth=1.2, color="darkorange", label="forecast path")
-        anchors = path[path["is_anchor"]]
-        ax.scatter(anchors["date"], anchors["predicted_price"],
-                   color="darkorange", s=25, zorder=3)
-    except (FileNotFoundError, KeyError) as exc:
-        forecast_err = str(exc)
-    ax.set_ylabel("price ($)")
-    ax.legend(fontsize=7, ncols=2)
-    if not hist.empty:
-        x_max = hist["snapshot_date"].max() + pd.Timedelta(days=100)
-        if forecast_err is None:
-            x_max = max(x_max, path["date"].max() + pd.Timedelta(days=15))
-        ax.set_xlim(hist["snapshot_date"].min() - pd.Timedelta(days=15), x_max)
-    fig.autofmt_xdate()
-    plt.tight_layout()
-    n_snapshots = len(hist)
-    return fig, forecast_err, n_snapshots
-
-
 def shap_waterfall(bundle, row: pd.DataFrame):
     cols = bundle["cat_cols"] + bundle["num_cols"]
     X = bundle["pipeline"].named_steps["cats"].transform(row[cols])
@@ -229,29 +131,6 @@ def main():
                     f"**{row['rarity'].iloc[0]}** · {row['series'].iloc[0]} · "
                     f"snapshot {row['snapshot_date'].iloc[0].date()}"
                 )
-                st.subheader("Price history vs model")
-                fig, forecast_err, n_snapshots = price_history_chart(
-                    cfg, row["card_id"].iloc[0], row["variant"].iloc[0])
-                st.pyplot(fig)
-                if n_snapshots < 3:
-                    st.info(
-                        f"Only {n_snapshots} snapshot(s) collected so far - "
-                        "the observed and predicted series grow with every "
-                        "`make collect` run. Green squares: the model's fair "
-                        "value at each snapshot; purple star: the honest "
-                        "out-of-fold prediction from a fold that never saw "
-                        "this card's set."
-                    )
-                if forecast_err:
-                    st.caption(f"No forward forecast yet: {forecast_err}")
-                else:
-                    st.caption(
-                        "Dashed path: current price compounded with the "
-                        "Task B forward-return predictions (30/90d point "
-                        "estimates, interpolated in log space). Triangles: "
-                        "out-of-fold Task B predictions vs what actually "
-                        "happened. Not financial advice."
-                    )
                 st.subheader("Why? (SHAP waterfall, log-price space)")
                 st.pyplot(shap_waterfall(bundle, row))
 
