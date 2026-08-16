@@ -209,10 +209,11 @@ def score_new_set(cfg, bundle, set_id: str) -> pd.DataFrame | None:
         latest[f"style_{j}"] = style[:, j]
 
     corpus = bundle["corpus"]
+    have_returns = np.isfinite(corpus["fwd_return"]).any()
     nb = build_neighbor_features(
         emb, latest["set_id"], corpus_emb=corpus["emb"],
         corpus_set_ids=pd.Series(corpus["set_id"]),
-        corpus_returns=corpus["fwd_return"],
+        corpus_returns=corpus["fwd_return"] if have_returns else None,
         corpus_premiums=corpus["art_premium"],
         ks=bundle["knn_ks"], top_decile_pct=bundle["top_decile_pct"])
     for col in nb.columns:
@@ -288,10 +289,12 @@ def render_new_set_scanner():
                     with col:
                         if pd.notna(corpus["image_url"][j]):
                             st.image(corpus["image_url"][j], width=110)
+                        ret = corpus["fwd_return"][j]
+                        ret_txt = (f"ret {ret:+.1%} · " if np.isfinite(ret)
+                                   else "")
                         st.caption(
                             f"{corpus['name'][j]}\n"
-                            f"sim {s:.2f} · ret "
-                            f"{corpus['fwd_return'][j]:+.1%} · prem "
+                            f"sim {s:.2f} · {ret_txt}prem "
                             f"{corpus['art_premium'][j]:+.2f}")
 
 

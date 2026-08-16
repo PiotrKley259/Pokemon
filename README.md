@@ -147,7 +147,13 @@ nearest neighbour — high novelty = extrapolation, flagged low-confidence).
 
 **5. Validation** holds out **entire recent sets** (released after a cutoff;
 default: newest 20% of sets), simulating the real use case of scoring a new
-set at release. Fill this table from `reports/coldstart_metrics.json`:
+set at release. With enough snapshot history the target is the realised 90d
+forward return; with a short history (e.g. a single snapshot) the trainer
+automatically falls back to **premium-only mode**, where the held-out-set
+target is today's cross-sectional art premium instead - answerable from day
+one, and clearly labelled via `mode` in `coldstart_metrics.json`. The
+return-based evaluation switches on automatically once snapshots span the
+horizon. Fill this table from `reports/coldstart_metrics.json`:
 
 | Feature set | Rank IC (held-out sets, 90d return) |
 |---|---|

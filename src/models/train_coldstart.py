@@ -200,12 +200,28 @@ def run_experiment(cfg: dict, crop: str) -> dict:
     log.info("[%s] PCA variance kept %.1f%% | rarity probe raw %.3f -> "
              "residualised %.3f", crop, 100 * var_kept, probe_raw, probe_resid)
 
+    # Mode: with enough realised forward returns, evaluate on them; with a
+    # short price history (e.g. a single snapshot) fall back to the
+    # cross-sectional art premium as the held-out-set target. The premium
+    # needs no future prices, so the cold-start question - "can the art
+    # predict which cards of an unseen set carry a premium?" - is answerable
+    # from day one.
+    have_returns = (train["fwd_return"].notna().sum() >= 50
+                    and test["fwd_return"].notna().sum() >= 20)
+    mode = "forward_return" if have_returns else "art_premium_cross_sectional"
+    if not have_returns:
+        log.info("[%s] too few realised %dd returns - running in premium-only "
+                 "mode (target: art_premium of held-out sets)",
+                 crop, cs["horizon_days"])
+
     # 3. neighbour features vs the TRAIN corpus (labelled rows only)
-    corpus_ok = train["fwd_return"].notna().to_numpy()
+    corpus_ok = (train["fwd_return"].notna() if have_returns
+                 else train["art_premium"].notna()).to_numpy()
     nb_kwargs = dict(
         corpus_emb=emb_train[corpus_ok],
         corpus_set_ids=train.loc[corpus_ok, "set_id"],
-        corpus_returns=train.loc[corpus_ok, "fwd_return"].to_numpy(),
+        corpus_returns=(train.loc[corpus_ok, "fwd_return"].to_numpy()
+                        if have_returns else None),
         corpus_premiums=train.loc[corpus_ok, "art_premium"].to_numpy(),
         ks=list(cs["knn_ks"]), top_decile_pct=cs["top_decile_pct"],
     )
@@ -225,9 +241,11 @@ def run_experiment(cfg: dict, crop: str) -> dict:
         emb_cols_raw.append(f"emb_{j}")
         emb_cols_style.append(f"style_{j}")
 
-    # 4. ablation on realised 90d returns of held-out sets
-    tr_lab = train[train["fwd_return"].notna()].reset_index(drop=True)
-    te_lab = test[test["fwd_return"].notna()].reset_index(drop=True)
+    # 4. ablation on the held-out sets: realised returns when available,
+    # otherwise today's cross-sectional art premium
+    target = "fwd_return" if have_returns else "art_premium"
+    tr_lab = train[train[target].notna()].reset_index(drop=True)
+    te_lab = test[test[target].notna()].reset_index(drop=True)
     equity_cols = ["character_equity", "rarity_set_baseline"]
     ablations = {
         "tabular_only": (TABULAR_CAT, TABULAR_NUM),
@@ -239,17 +257,22 @@ def run_experiment(cfg: dict, crop: str) -> dict:
         "tabular+equity+style+neighbours": (
             TABULAR_CAT, TABULAR_NUM + equity_cols + emb_cols_style + nb_cols),
     }
+    # Baseline: character equity alone ("buy Charizard because Charizard").
+    # In premium mode it is a sanity floor: the premium is the residual left
+    # AFTER removing equity, so equity should carry little rank information -
+    # any ablation cell has to clear it comfortably.
     results = {"character_equity_baseline":
-               _metrics(te_lab["fwd_return"].to_numpy(),
+               _metrics(te_lab[target].to_numpy(),
                         te_lab["character_equity"].to_numpy())}
     for name, (cats, nums) in ablations.items():
-        pred = fit_predict(tr_lab, te_lab, cats, nums, "fwd_return", seed)
-        results[name] = _metrics(te_lab["fwd_return"].to_numpy(), pred)
+        pred = fit_predict(tr_lab, te_lab, cats, nums, target, seed)
+        results[name] = _metrics(te_lab[target].to_numpy(), pred)
         log.info("[%s] %-32s rank IC %+.3f (n=%d)", crop, name,
                  results[name]["rank_ic"], results[name]["n"])
 
     return {
         "crop": crop, "encoder": encoder,
+        "mode": mode, "ablation_target": target,
         "holdout_cutoff": str(cutoff.date()),
         "n_train_cards": len(train), "n_holdout_cards": len(test),
         "pca_variance_retained": var_kept,
@@ -290,6 +313,7 @@ def save_premium_model(cfg: dict, res: dict, crop: str) -> None:
                        for c in cats},
         "decomposer": a["decomp"], "pca": a["pca"], "residualiser": a["resid"],
         "crop": crop, "encoder": res["encoder"], "seed": seed,
+        "mode": res["mode"],
         "knn_ks": list(cfg["coldstart"]["knn_ks"]),
         "top_decile_pct": cfg["coldstart"]["top_decile_pct"],
         "corpus": {

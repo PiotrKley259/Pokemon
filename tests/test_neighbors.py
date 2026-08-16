@@ -83,6 +83,24 @@ def test_nearest_neighbors_helper(corpus):
     assert np.all(np.diff(sim) <= 1e-12)            # sorted descending
 
 
+def test_premium_only_mode_without_returns(corpus):
+    """corpus_returns=None (single-snapshot history): return features are
+    absent, premium features unchanged, dispersion falls back to premiums."""
+    emb, sets, returns, premiums = corpus
+    feats = build_neighbor_features(
+        np.array([[1.0, 0.0]]), pd.Series(["zzz"]), emb, sets,
+        None, premiums, ks=[2], top_decile_pct=0.25, dispersion_k=3)
+    assert not any(c.endswith("_mean_return") for c in feats.columns)
+
+    with_ret = build_neighbor_features(
+        np.array([[1.0, 0.0]]), pd.Series(["zzz"]), emb, sets,
+        returns, premiums, ks=[2], top_decile_pct=0.25, dispersion_k=3)
+    assert feats.loc[0, "top2_sim_mean_premium"] == \
+        with_ret.loc[0, "top2_sim_mean_premium"]
+    assert feats.loc[0, "novelty_score"] == with_ret.loc[0, "novelty_score"]
+    assert np.isfinite(feats.loc[0, "neighbour_dispersion"])
+
+
 def test_residualiser_removes_rarity_signal():
     """Embeddings built to encode rarity directly: after residualising on
     rarity, a linear probe should drop to near-chance accuracy."""
