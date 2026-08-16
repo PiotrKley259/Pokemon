@@ -1,4 +1,5 @@
-.PHONY: install collect data train evaluate test dashboard all
+.PHONY: install collect data train evaluate test dashboard all \
+        images embed coldstart
 
 install:
 	pip install -r requirements.txt
@@ -20,5 +21,15 @@ test:
 
 dashboard:
 	streamlit run app/dashboard.py
+
+images:
+	python -m src.data.images
+
+embed:
+	python -m src.features.embeddings --crop art
+	python -m src.features.embeddings --crop full
+
+coldstart:
+	python -m src.models.train_coldstart --compare-crops
 
 all: data train evaluate

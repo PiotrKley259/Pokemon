@@ -18,7 +18,9 @@ import shap
 import streamlit as st
 
 from src.config import load_config, resolve_path
-from src.features.build_features import build_task_a_frame
+from src.features.build_features import add_static_features, build_task_a_frame
+from src.features.neighbors import build_neighbor_features, nearest_neighbors
+from src.features.price_decomposition import PriceDecomposer  # noqa: F401 (unpickling)
 
 st.set_page_config(page_title="Pokemon TCG fair value", layout="wide")
 
@@ -77,7 +79,8 @@ def main():
         )
         return
 
-    tab_card, tab_ranked = st.tabs(["Card lookup", "Most undervalued"])
+    tab_card, tab_ranked, tab_scanner = st.tabs(
+        ["Card lookup", "Most undervalued", "New Set Scanner"])
 
     with tab_card:
         scored["label"] = (
@@ -126,6 +129,144 @@ def main():
                                 "gap_pct": "{:+.1f}%"}),
             use_container_width=True, height=600,
         )
+
+    with tab_scanner:
+        render_new_set_scanner()
+
+
+# --------------------------------------------------------------------------
+# New Set Scanner (cold-start visual model)
+# --------------------------------------------------------------------------
+@st.cache_resource
+def load_coldstart():
+    cfg = load_config()
+    return cfg, joblib.load(
+        resolve_path(cfg, "models_dir") / "coldstart_premium.joblib")
+
+
+def _confidence(novelty: float, dispersion: float) -> tuple[str, str]:
+    """Badge from novelty (extrapolation risk) + neighbour dispersion."""
+    if not np.isfinite(novelty) or not np.isfinite(dispersion):
+        return "no data", "⚪"
+    if novelty > 0.35 or dispersion > 0.5:
+        return "low confidence", "🔴"
+    if novelty > 0.2 or dispersion > 0.25:
+        return "medium confidence", "🟡"
+    return "high confidence", "🟢"
+
+
+def score_new_set(cfg, bundle, set_id: str) -> pd.DataFrame | None:
+    from src.features.embeddings import load_embeddings
+
+    df_raw = pd.read_parquet(resolve_path(cfg, "dataset"))
+    rows = df_raw[df_raw["set_id"] == set_id]
+    if rows.empty:
+        return None
+    latest = (add_static_features(rows).sort_values("snapshot_date")
+              .groupby(["card_id", "variant"], sort=False).tail(1)
+              .reset_index(drop=True))
+
+    emb_all, ids = load_embeddings(cfg, bundle["crop"], bundle["encoder"])
+    idx = {cid: i for i, cid in enumerate(ids)}
+    latest = latest[latest["card_id"].isin(idx)].reset_index(drop=True)
+    if latest.empty:
+        return None
+    emb = emb_all[[idx[c] for c in latest["card_id"]]]
+
+    comp = bundle["decomposer"].transform(latest)
+    latest["character_equity"] = comp["character_equity"].to_numpy()
+    latest["rarity_set_baseline"] = comp["rarity_set_baseline"].to_numpy()
+
+    z = bundle["pca"].transform(emb)
+    style = bundle["residualiser"].transform(z, latest.assign(era=latest["series"]))
+    for j in range(style.shape[1]):
+        latest[f"style_{j}"] = style[:, j]
+
+    corpus = bundle["corpus"]
+    nb = build_neighbor_features(
+        emb, latest["set_id"], corpus_emb=corpus["emb"],
+        corpus_set_ids=pd.Series(corpus["set_id"]),
+        corpus_returns=corpus["fwd_return"],
+        corpus_premiums=corpus["art_premium"],
+        ks=bundle["knn_ks"], top_decile_pct=bundle["top_decile_pct"])
+    for col in nb.columns:
+        latest[col] = nb[col].to_numpy()
+
+    cols = bundle["cat_cols"] + bundle["num_cols"]
+    X = latest[cols].copy()
+    for c, dtype in bundle["cat_dtypes"].items():
+        X[c] = X[c].astype(dtype)
+    latest["pred_art_premium"] = bundle["model"].predict(X)
+    latest["_emb_row"] = range(len(latest))
+    latest.attrs["emb"] = emb
+    return latest
+
+
+def render_new_set_scanner():
+    st.subheader("New Set Scanner — cold-start visual scoring")
+    st.caption(
+        "Scores cards from art + static metadata only (no price history). "
+        "The predicted **art premium** is the log-price residual after "
+        "removing character equity and the rarity/era baseline."
+    )
+    try:
+        cfg, bundle = load_coldstart()
+    except FileNotFoundError:
+        st.warning("Cold-start model missing. Run `make images`, "
+                   "`make embed`, then `make coldstart` first.")
+        return
+
+    df_raw = pd.read_parquet(resolve_path(cfg, "dataset"))
+    sets = (df_raw.dropna(subset=["release_date"])
+            .groupby("set_id").agg(set_name=("set_name", "first"),
+                                   release=("release_date", "max"))
+            .sort_values("release", ascending=False))
+    label_map = {f"{r.set_name} ({sid}, {r.release.date()})": sid
+                 for sid, r in sets.iterrows()}
+    choice = st.selectbox("Set (newest first)", list(label_map))
+    scored = score_new_set(cfg, bundle, label_map[choice])
+    if scored is None:
+        st.info("No cards with cached embeddings for this set — run "
+                "`make images` and `make embed` after collecting it.")
+        return
+
+    scored = scored.sort_values("pred_art_premium", ascending=False)
+    corpus = bundle["corpus"]
+    emb = scored.attrs["emb"]
+    top_n = st.slider("Cards to show", 5, 50, 15)
+
+    for _, card in scored.head(top_n).iterrows():
+        conf_label, conf_icon = _confidence(card["novelty_score"],
+                                            card["neighbour_dispersion"])
+        with st.expander(
+            f"{conf_icon} {card['name']} ({card['variant']}) — "
+            f"predicted art premium {card['pred_art_premium']:+.2f}",
+            expanded=False,
+        ):
+            c1, c2 = st.columns([1, 3])
+            with c1:
+                if pd.notna(card["image_url"]):
+                    st.image(card["image_url"], width=180)
+                st.write(f"**{card['rarity']}**")
+                st.write(f"{conf_icon} {conf_label}")
+                st.write(f"novelty {card['novelty_score']:.2f} · "
+                         f"dispersion {card['neighbour_dispersion']:.2f}")
+            with c2:
+                st.write("**5 nearest visual neighbours** "
+                         "(historical 90d return / art premium)")
+                nn_idx, nn_sim = nearest_neighbors(
+                    emb[int(card["_emb_row"])], card["set_id"],
+                    corpus["emb"], pd.Series(corpus["set_id"]), n=5)
+                thumb_cols = st.columns(max(len(nn_idx), 1))
+                for col, j, s in zip(thumb_cols, nn_idx, nn_sim):
+                    with col:
+                        if pd.notna(corpus["image_url"][j]):
+                            st.image(corpus["image_url"][j], width=110)
+                        st.caption(
+                            f"{corpus['name'][j]}\n"
+                            f"sim {s:.2f} · ret "
+                            f"{corpus['fwd_return'][j]:+.1%} · prem "
+                            f"{corpus['art_premium'][j]:+.2f}")
 
 
 if __name__ == "__main__":

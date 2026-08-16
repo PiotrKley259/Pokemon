@@ -8,6 +8,8 @@ venv/
 # data and artifacts stay local
 data/raw/*
 data/processed/*
+data/images/
+data/embeddings/
 models/*
 reports/*
 !reports/figures/

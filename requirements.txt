@@ -14,3 +14,9 @@ joblib>=1.3
 streamlit>=1.32
 pytest>=8.0
 jupyter>=1.0
+
+# cold-start visual model
+Pillow>=10.2
+torch>=2.2
+open_clip_torch>=2.24
+

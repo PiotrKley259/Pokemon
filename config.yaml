@@ -9,6 +9,8 @@ paths:
   models_dir: models
   reports_dir: reports
   figures_dir: reports/figures
+  images_dir: data/images
+  embeddings_dir: data/embeddings
 
 api:
   base_url: https://api.pokemontcg.io/v2
@@ -73,6 +75,26 @@ validation:
     n_splits: 4          # expanding-window time splits
     embargo_days: 5      # extra gap on top of the h-day purge
     min_train_days: 60
+
+coldstart:
+  image_size: 336
+  # Fractional (left, top, right, bottom) box of the illustration window on a
+  # standard modern card layout; full-art cards are mostly illustration anyway.
+  art_crop: [0.08, 0.11, 0.92, 0.545]
+  encoder: clip            # clip (open_clip ViT-L/14) or dinov2
+  clip_model: ViT-L-14
+  clip_pretrained: openai
+  dinov2_model: dinov2_vitb14
+  batch_size: 32
+  crop: art                # which crop feeds the models: art | full
+  pca_dims: 64
+  shrinkage_k: 5.0         # empirical-Bayes prior strength for character equity
+  knn_ks: [10, 25, 50]
+  top_decile_pct: 0.10
+  horizon_days: 90
+  # Sets released strictly after this date form the held-out "new sets".
+  # null = hold out the most recent 20% of sets by release date.
+  holdout_after: null
 
 model:
   optuna_trials: 50
